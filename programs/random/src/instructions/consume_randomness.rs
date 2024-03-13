@@ -40,17 +40,21 @@ pub fn consume_randomness_handler(ctx: Context<ConsumeRandomness>) -> Result<()>
 
     let _winner_indexes = round_state.winner_indexes;
 
-    for i in 0.._winner_indexes.len() {
+    for i in 0..value.len() {
+        // When will we obtain the complete lottery results
+        if i >= _winner_indexes.len() {
+            break;
+        }
+
         let result = value[i] % round_state.count;
         msg!("Updating VRF State with random value: {:?}", result);
         let round_winner = round_state.winner_indexes;
+
         if round_winner.contains(&result) {
-            let epoch = Clock::get().unwrap().epoch.ilog10();
-            let max = u32::MAX;
-            round_state.winner_indexes[i] = (value[i] + (max - epoch) as u16) % round_state.count;
-        } else {
-            round_state.winner_indexes[i] = result;
+            continue;
         }
+
+        round_state.winner_indexes[i] = result;
     }
 
     Ok(())

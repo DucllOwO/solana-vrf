@@ -110,7 +110,9 @@ describe.only("random-vrf", () => {
         const tree = new MerkleTree(leaves, sha256)
         const root = tree.getRoot()
         // Request randomness and roll dice
+      
         console.log("🚀 ~ it ~ roundBump:", roundBump)
+
         const tx = await program.methods.requestRandomness(Buffer.from(roundId.toString()), {
           switchboardStateBump: switchboardProgram.programState.bump,
           permissionBump,
