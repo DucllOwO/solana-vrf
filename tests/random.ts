@@ -8,6 +8,8 @@ import { OracleQueueAccountData } from "@switchboard-xyz/solana.js/lib/generated
 import { StatusVerified } from "@switchboard-xyz/solana.js/lib/generated/oracle-program/types/VrfStatus";
 import MerkleTree from "merkletreejs";
 import sha256 from 'crypto-js/sha256';
+import { BN } from "bn.js";
+import { ComputeBudgetProgram } from "@solana/web3.js";
 
 function delay(ms: number) {
   return new Promise( resolve => setTimeout(resolve, ms) );
@@ -44,7 +46,11 @@ describe.only("random-vrf", () => {
   })
 
   it("request randomness", async () => {
-    let roundId = 1;
+    let bytes = 8 + 1 + 64 + 4 + 4 + 32 + 8 + 32 + 4 + 4*750;
+    let temp = await provider.connection.getMinimumBalanceForRentExemption(40289, "max");
+
+    console.log(temp)
+    let roundId = 1205;
     const roundSecret = anchor.web3.Keypair.generate()
     const [roundState, roundBump] = anchor.web3.PublicKey.findProgramAddressSync(
       [
@@ -67,17 +73,28 @@ describe.only("random-vrf", () => {
       ixData: randomIxCoder.encode("consumeRandomness", ""), // pass any params for instruction here
     }
     // Create Switchboard VRF and Permission account
-    const [vrfAccount, vrfState] = await queueAccount.createVrf({
-      callback: roundCallback,
-      authority: roundState, // vrf authority
-      vrfKeypair: roundSecret,
-      enable: false, // only set permissions if required
-    })
+    const [vrfAccount, vrfInitTxn] = await queueAccount.createVrfInstructions(
+      payer.publicKey,
+      {
+        callback: roundCallback,
+        authority: roundState, // vrf authority
+        vrfKeypair: roundSecret,
+        enable: false, // only set permissions if required
+      }
+    );
+
+    await switchboardProgram.signAndSend(vrfInitTxn, {
+      preflightCommitment: "max",
+    });
+
+    // vrf data
+    let vrf = await vrfAccount.loadData();
+    console.log(vrf.authority);
 
 
     const [payerTokenWallet] = await switchboardProgram.mint.getOrCreateWrappedUser(
       switchboardProgram.walletPubkey,
-      { fundUpTo: 1.0 }
+      { fundUpTo: 0.1 }
     );
     console.log("🚀 ~ it ~ payerTokenWallet:", payerTokenWallet)
     
@@ -90,35 +107,19 @@ describe.only("random-vrf", () => {
     )
 
     for (let index = 0; index < 1; index++) {
-      // vrf data
-      let vrf = await vrfAccount.loadData();
-
-      let counter = vrf.counter.toNumber();
-      let status = vrf.status.kind;
-      let txRemaining = vrf.builders[0].txRemaining;
-      let requestSlot = vrf.currentRound.requestSlot.toNumber();
-
-      console.log(`Counter: ${counter}`);
-      console.log(`RequestSlot: ${requestSlot}`);
-      console.log(`Status: ${status}`);
-      console.log(`TxnRemaining: ${txRemaining}`);
-
-      console.log(`Created VRF Account: ${vrfAccount.publicKey}`)
-      
       try {
-        const leaves = ['68058', '68057', '42058', '65058', '68757', '22058'].map(x => Buffer.from(sha256(x).toString(), 'hex'))
+        const prizeCount = 749;
+        const leaves = ['0,68058', '1,68057', '42058', '65058', '68757', '22058'].map(x => Buffer.from(sha256(x).toString(), 'hex'))
         const tree = new MerkleTree(leaves, sha256)
         const root = tree.getRoot()
         // Request randomness and roll dice
-      
-        console.log("🚀 ~ it ~ roundBump:", roundBump)
-
-        const tx = await program.methods.requestRandomness(Buffer.from(roundId.toString()), {
+        const requestInstruction = await program.methods.requestRandomness(Buffer.from(roundId.toString()), {
           switchboardStateBump: switchboardProgram.programState.bump,
           permissionBump,
-          count: 10000,
+          nftCount: 10000,
           merkleRoot: root,
           roundBump: roundBump,
+          prizeCount: prizeCount
         })
         .accounts({
           roundState: roundState,
@@ -137,35 +138,66 @@ describe.only("random-vrf", () => {
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .signers([payer])
-          .rpc()
+        .instruction()
+
+        const transaction = new anchor.web3.Transaction()
+        .add(requestInstruction);
+        
+        const tx = await program.provider.sendAndConfirm(transaction)
         
         console.log("tx: ", tx);
         
         await provider.connection.confirmTransaction(tx, "confirmed")
   
-        console.log(`Created VrfClient Account: ${roundState}`)
+        console.log(`round state: ${roundState}`)
   
         console.log("Rolling result...")
   
         let didUpdate = false;
         let roundCurrentState = await program.account.roundState.fetch(roundState)
-  
-        while(true){
+        let result = [];
+        while (true) {
           console.log("Checking result...")
           roundCurrentState = await program.account.roundState.fetch(roundState);
           didUpdate = roundCurrentState.timestamp.toNumber() > 0;
           vrf = await vrfAccount.loadData();
           if (vrf.status.kind === "StatusCallbackSuccess" && didUpdate) {
-            roundCurrentState = await program.account.roundState.fetch(roundState);
-            console.log(roundCurrentState)
-            break
+            console.time("start get result")
+            while (true) {
+              // get random number 
+              let drawRandom = await program.methods.drawRandomNumber(50).accounts({ roundState: roundState }).signers([payer]).instruction()
+
+              const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({ 
+                units: 1000000
+              });
+
+              const transaction = new anchor.web3.Transaction()
+                .add(modifyComputeUnits, drawRandom);
+              
+              const tx = await program.provider.sendAndConfirm(transaction)
+              
+            
+              await provider.connection.confirmTransaction(tx, "max")
+              
+              roundCurrentState = await program.account.roundState.fetch(roundState);
+              console.log("draw tx hash: ",tx)
+
+              console.log("current prize remaning prize: ", roundCurrentState.prizeRemaining);
+
+              if (roundCurrentState.prizeRemaining <= 0) {
+                break
+              }
+            }
           } else {
             console.log("Wating vrf status to success 2 seconds....");
             await delay(2000)
           }
+          roundCurrentState = await program.account.roundState.fetch(roundState);
+          if (roundCurrentState.prizeRemaining <= 0) {
+            console.log(roundCurrentState.winner_indexes)
+            break
+          }
         }
-
-        console.log("=========RESULT: ", roundCurrentState.winnerIndexes);
       } catch (e) {
         console.log(e)
         assert.fail()
@@ -173,14 +205,4 @@ describe.only("random-vrf", () => {
       
     }
   })
-
-  
-  // it("cal space",async () => {
-
-  //   const leaves = ['68058', '68057', '42058', '65058', '68757', '22058'].map(x => Buffer.from(sha256(x).toString(), 'hex'))
-  //   console.log(leaves)
-  //   const tree = new MerkleTree(leaves, sha256)
-  //   const root = tree.getRoot().toString('hex')
-  //   console.log(Buffer.from(root, 'hex'))
-  // })
 });

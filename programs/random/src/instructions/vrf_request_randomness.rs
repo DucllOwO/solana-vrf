@@ -8,7 +8,7 @@ use switchboard_v2::{
 };
 
 #[derive(Accounts)]
-#[instruction(round_id: String)]
+#[instruction(round_id: String, params: RequestRandomnessParams)]
 pub struct RequestRandomness<'info> {
     // PAYER ACCOUNTS
     #[account(mut)]
@@ -30,14 +30,14 @@ pub struct RequestRandomness<'info> {
         has_one = data_buffer
     )]
     pub oracle_queue: AccountLoader<'info, OracleQueueAccountData>,
-    /// CHECK:
     #[account(
         mut,
         constraint = oracle_queue.load()?.authority == queue_authority.key()
     )]
+    /// CHECK:
     pub queue_authority: UncheckedAccount<'info>,
-    /// CHECK
     #[account(mut)]
+    /// CHECK:
     pub data_buffer: AccountInfo<'info>,
     #[account(mut)]
     pub permission: AccountLoader<'info, PermissionAccountData>,
@@ -68,10 +68,10 @@ pub struct RequestRandomness<'info> {
             round_id.as_bytes()
         ],
         payer = user,
-        space = 8 + std::mem::size_of::<RoundState>(),
+        space = 8 + 1 + 32 + 4 + 4 + 4 + 32 + 8 + 32 + 4 + 4*params.prize_count as usize + 8,
         bump
     )]
-    pub round_state: AccountLoader<'info, RoundState>,
+    pub round_state: Account<'info, RoundState>,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
@@ -79,8 +79,9 @@ pub struct RequestRandomnessParams {
     pub permission_bump: u8,
     pub switchboard_state_bump: u8,
     pub round_bump: u8,
-    pub merkle_root: [u8; 64],
-    pub count: u16,
+    pub merkle_root: [u8; 32],
+    pub nft_count: u32,
+    pub prize_count: u32,
 }
 
 pub fn request_randomness_handler(
@@ -89,15 +90,16 @@ pub fn request_randomness_handler(
     params: RequestRandomnessParams,
 ) -> Result<()> {
     let switchboard_program = ctx.accounts.switchboard_program.to_account_info();
-    let mut round_state = ctx.accounts.round_state.load_init()?;
+    let round_state = &mut ctx.accounts.round_state;
 
     round_state.vrf = ctx.accounts.vrf.key();
     round_state.bump = ctx.bumps.get("round_state").unwrap().clone();
     round_state.merkle_root = params.merkle_root;
-    round_state.count = params.count;
+    round_state.nft_count = params.nft_count;
+    round_state.prize_count = params.prize_count;
+    round_state.prize_remaining = params.prize_count;
 
     let bump = round_state.bump.clone();
-    drop(round_state);
 
     // build vrf request struct from the Switchboard Rust crate
     let vrf_request_randomness = VrfRequestRandomness {
